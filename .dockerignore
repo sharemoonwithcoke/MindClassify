@@ -1,0 +1,18 @@
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.egg-info
+.eggs
+dist
+build
+.env
+.venv
+venv
+.git
+.gitignore
+*.md
+# keep data/ and saved_models/ out of the image layer (they are volume-mounted)
+data/
+saved_models/
+plots/
