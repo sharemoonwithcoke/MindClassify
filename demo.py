@@ -82,7 +82,7 @@ def _load_model(model_type: str, model_path: str | None):
             candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
             return _load_model("transformer", candidates[0])
 
-        pkl = os.path.join(save_dir, "best_baseline.pkl")
+        pkl = os.path.join(save_dir, "baseline.pkl")
         if os.path.exists(pkl):
             return _load_model("baseline", pkl)
 
