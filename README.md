@@ -14,6 +14,8 @@ Place your dataset CSV at `data/mental_health.csv`.
 Expected columns: `statement` (text), `status` (label).
 
 Supported labels: Normal, Depression, Suicidal, Anxiety, Stress, Bipolar, Personality Disorder
+> Dataset download: [Sentiment Analysis for Mental Health](https://www.kaggle.com/datasets/suchintikasarkar/sentiment-analysis-for-mental-health)
+> Expected columns: `statement` (text) and `status` (label string).
 
 ## Workflow
 
