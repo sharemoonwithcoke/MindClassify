@@ -98,7 +98,7 @@ def _init_model():
             return
 
     if model_type_env in ("baseline", "auto"):
-        pkl = os.path.join(save_dir, "best_baseline.pkl")
+        pkl = os.path.join(save_dir, "baseline.pkl")
         if os.path.exists(pkl):
             _load_baseline(pkl)
             _model_type = "baseline"
