@@ -11,6 +11,8 @@ classification task and verify feasibility without requiring a GPU.
 
 import argparse
 import os
+import json
+import random
 import joblib
 import numpy as np
 import pandas as pd
@@ -30,9 +32,33 @@ os.makedirs(SAVE_DIR, exist_ok=True)
 
 BASELINE_FILENAME = "baseline_lr.pkl"
 SUICIDAL_IDX = LABEL_NAMES.index("Suicidal")
+BASELINE_META_FILENAME = "baseline_lr_metadata.json"
 
 
-def build_pipeline(fast: bool = False) -> Pipeline:
+def _set_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+
+
+def _package_versions() -> dict:
+    try:
+        import importlib.metadata as importlib_metadata
+        return {
+            "python": os.sys.version.split()[0],
+            "numpy": np.__version__,
+            "pandas": pd.__version__,
+            "scikit-learn": importlib_metadata.version("scikit-learn"),
+        }
+    except Exception:
+        return {
+            "python": os.sys.version.split()[0],
+            "numpy": np.__version__,
+            "pandas": pd.__version__,
+            "scikit-learn": "unknown",
+        }
+
+
+def build_pipeline(fast: bool = False, seed: int = 42) -> Pipeline:
     return Pipeline([
         ("tfidf", TfidfVectorizer(
             ngram_range=(1, 2),
@@ -63,13 +89,15 @@ def evaluate(pipeline, X_test, y_test) -> dict:
 
 
 def train_baseline(data_path: str, cv_folds: int = 5,
-                   max_train_samples: int = None, fast: bool = False):
+                   max_train_samples: int = None, fast: bool = False,
+                   seed: int = 42):
+    _set_seed(seed)
     df = load_dataset(data_path, cleaning="baseline")
-    train, val, test = split_dataset(df)
+    train, val, test = split_dataset(df, seed=seed)
     train_full = pd.concat([train, val], ignore_index=True)
 
     if max_train_samples and max_train_samples < len(train_full):
-        train_full = train_full.sample(max_train_samples, random_state=42).reset_index(drop=True)
+        train_full = train_full.sample(max_train_samples, random_state=seed).reset_index(drop=True)
         print(f"  [fast mode] Training on {len(train_full)} samples")
 
     X_train = train_full["text"].tolist()
@@ -77,7 +105,7 @@ def train_baseline(data_path: str, cv_folds: int = 5,
     X_test  = test["text"].tolist()
     y_test  = test["label_id"].tolist()
 
-    pipeline = build_pipeline(fast=fast)
+    pipeline = build_pipeline(fast=fast, seed=seed)
 
     print(f"\n{'='*60}")
     print("Step 1 — Baseline: TF-IDF + Logistic Regression")
@@ -115,6 +143,25 @@ def train_baseline(data_path: str, cv_folds: int = 5,
     joblib.dump(pipeline, save_path)
     print(f"\nSaved → {save_path}")
 
+    metadata = {
+        "model_name": "TF-IDF + Logistic Regression",
+        "seed": seed,
+        "cv_folds": cv_folds,
+        "fast": fast,
+        "max_train_samples": max_train_samples,
+        "data_path": data_path,
+        "metrics": {
+            "accuracy": metrics["accuracy"],
+            "f1_macro": metrics["f1_macro"],
+            "suicidal_recall": float(metrics["per_class_recall"][SUICIDAL_IDX]),
+        },
+        "versions": _package_versions(),
+    }
+    meta_path = os.path.join(SAVE_DIR, BASELINE_META_FILENAME)
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(metadata, f, indent=2)
+    print(f"Saved metadata → {meta_path}")
+
     return pipeline, metrics, test
 
 
@@ -131,6 +178,7 @@ if __name__ == "__main__":
     parser.add_argument("--cv_folds", type=int, default=5)
     parser.add_argument("--max_train_samples", type=int, default=None)
     parser.add_argument("--fast", action="store_true")
+    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
     if args.fast:
@@ -143,7 +191,7 @@ if __name__ == "__main__":
 
     pipeline, metrics, test_df = train_baseline(
         args.data_path, args.cv_folds,
-        max_train_samples=args.max_train_samples, fast=args.fast)
+        max_train_samples=args.max_train_samples, fast=args.fast, seed=args.seed)
 
     from analysis import plot_confusion_matrix, plot_per_class_f1, qualitative_suicidal_analysis
     y_true = test_df["label_id"].tolist()
