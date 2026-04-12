@@ -28,7 +28,10 @@ import numpy as np
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
-from data_preprocessing import clean_text, LABEL_NAMES, ID2LABEL
+from data_preprocessing import (
+    clean_text_baseline, clean_text_transformer,
+    LABEL_NAMES, ID2LABEL, MAX_LENGTH,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -36,25 +39,39 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)
 
-# ── Global model state ────────────────────────────────────────────────────────
 _model = None
 _tokenizer = None
-_model_type = None   # "transformer" | "baseline" | "demo"
+_model_type = None
 _device = None
+_max_length = MAX_LENGTH   
+
+BASELINE_FILENAME = "baseline_lr.pkl"
+MAX_TEXT_LENGTH = 10_000 
+
+
+def _read_training_config(path: str) -> dict:
+    """Read training_config.json from checkpoint dir if it exists."""
+    cfg_path = os.path.join(path, "training_config.json")
+    if os.path.exists(cfg_path):
+        with open(cfg_path) as f:
+            return json.load(f)
+    return {}
 
 
 def _load_transformer(path: str):
     import torch
     from transformers import AutoTokenizer, AutoModelForSequenceClassification
-    global _model, _tokenizer, _device
+    global _model, _tokenizer, _device, _max_length
 
     _device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Loading transformer from {path} on {_device}")
     _tokenizer = AutoTokenizer.from_pretrained(path)
     _model = AutoModelForSequenceClassification.from_pretrained(path)
-    _model.eval()
-    _model.to(_device)
-    logger.info("Transformer loaded.")
+    _model.eval().to(_device)
+
+    cfg = _read_training_config(path)
+    _max_length = cfg.get("max_length", MAX_LENGTH)
+    logger.info(f"Transformer loaded. max_length={_max_length}")
 
 
 def _load_baseline(path: str):
@@ -71,7 +88,6 @@ def _init_model():
     model_type_env = os.getenv("MODEL_TYPE", "auto").lower()
     model_path_env = os.getenv("MODEL_PATH", "")
 
-    # ── Explicit path provided ────────────────────────────────────────────────
     if model_path_env:
         if model_path_env.endswith(".pkl"):
             _load_baseline(model_path_env)
@@ -81,7 +97,6 @@ def _init_model():
             _model_type = "transformer"
         return
 
-    # ── Auto-detect ───────────────────────────────────────────────────────────
     save_dir = "saved_models"
     if model_type_env in ("transformer", "auto"):
         candidates = [
@@ -91,33 +106,28 @@ def _init_model():
         ] if os.path.isdir(save_dir) else []
 
         if candidates:
-            # pick the most recently modified
             candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
             _load_transformer(candidates[0])
             _model_type = "transformer"
             return
 
     if model_type_env in ("baseline", "auto"):
-        pkl = os.path.join(save_dir, "baseline.pkl")
+        pkl = os.path.join(save_dir, BASELINE_FILENAME)
         if os.path.exists(pkl):
             _load_baseline(pkl)
             _model_type = "baseline"
             return
 
-    logger.warning("No trained model found — running in DEMO mode with mock predictions.")
+    logger.warning("No trained model found — running in DEMO mode.")
     _model_type = "demo"
+
 
 
 def _predict_transformer(texts: List[str]) -> List[Dict[str, Any]]:
     import torch
-    cleaned = [clean_text(t) for t in texts]
-    enc = _tokenizer(
-        cleaned,
-        truncation=True,
-        padding=True,
-        max_length=128,
-        return_tensors="pt",
-    )
+    cleaned = [clean_text_transformer(t) for t in texts]
+    enc = _tokenizer(cleaned, truncation=True, padding=True,
+                     max_length=_max_length, return_tensors="pt")
     enc = {k: v.to(_device) for k, v in enc.items()}
     with torch.no_grad():
         logits = _model(**enc).logits
@@ -136,17 +146,14 @@ def _predict_transformer(texts: List[str]) -> List[Dict[str, Any]]:
 
 
 def _predict_baseline(texts: List[str]) -> List[Dict[str, Any]]:
-    cleaned = [clean_text(t) for t in texts]
+    cleaned = [clean_text_baseline(t) for t in texts]
     preds = _model.predict(cleaned)
 
-    # Try to get probabilities if the final estimator supports it
     try:
         probs_matrix = _model.predict_proba(cleaned)
     except AttributeError:
-        # LinearSVC doesn't have predict_proba; use decision function as proxy
         try:
             df = _model.decision_function(cleaned)
-            # Softmax approximation
             exp_df = np.exp(df - df.max(axis=1, keepdims=True))
             probs_matrix = exp_df / exp_df.sum(axis=1, keepdims=True)
         except Exception:
@@ -161,18 +168,14 @@ def _predict_baseline(texts: List[str]) -> List[Dict[str, Any]]:
         else:
             probs = {label: (1.0 if j == pred_id else 0.0) for j, label in enumerate(LABEL_NAMES)}
             confidence = 1.0
-
         results.append({
-            "label": ID2LABEL[pred_id],
-            "label_id": int(pred_id),
-            "confidence": confidence,
-            "probabilities": probs,
+            "label": ID2LABEL[pred_id], "label_id": int(pred_id),
+            "confidence": confidence, "probabilities": probs,
         })
     return results
 
 
 def _predict_demo(texts: List[str]) -> List[Dict[str, Any]]:
-    """Mock predictor for demo mode — uses keyword heuristics."""
     keyword_map = {
         "depress": "Depression", "sad": "Depression", "hopeless": "Depression",
         "suicid": "Suicidal", "kill myself": "Suicidal", "end my life": "Suicidal",
@@ -182,8 +185,6 @@ def _predict_demo(texts: List[str]) -> List[Dict[str, Any]]:
         "personality": "Personality Disorder", "borderline": "Personality Disorder",
     }
     results = []
-    rng = np.random.default_rng(seed=42)
-
     for text in texts:
         lower = text.lower()
         matched = "Normal"
@@ -191,16 +192,13 @@ def _predict_demo(texts: List[str]) -> List[Dict[str, Any]]:
             if kw in lower:
                 matched = label
                 break
-
-        # Build plausible probability distribution
+        rng = np.random.default_rng(seed=abs(hash(text)) % (2**31))
         base = rng.dirichlet(np.ones(len(LABEL_NAMES)) * 0.5)
         pred_id = LABEL_NAMES.index(matched)
         base[pred_id] = max(base[pred_id], 0.55)
         base /= base.sum()
-
         results.append({
-            "label": matched,
-            "label_id": pred_id,
+            "label": matched, "label_id": pred_id,
             "confidence": float(base[pred_id]),
             "probabilities": {LABEL_NAMES[i]: float(base[i]) for i in range(len(LABEL_NAMES))},
             "demo_mode": True,
@@ -220,11 +218,7 @@ def predict(texts: List[str]) -> List[Dict[str, Any]]:
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({
-        "status": "ok",
-        "model_type": _model_type,
-        "labels": LABEL_NAMES,
-    })
+    return jsonify({"status": "ok", "model_type": _model_type, "labels": LABEL_NAMES})
 
 
 @app.route("/predict", methods=["POST"])
@@ -232,13 +226,12 @@ def predict_single():
     data = request.get_json(force=True)
     if not data or "text" not in data:
         return jsonify({"error": "Missing 'text' field"}), 400
-
     text = str(data["text"]).strip()
     if not text:
         return jsonify({"error": "Empty text"}), 400
-
-    results = predict([text])
-    return jsonify(results[0])
+    if len(text) > MAX_TEXT_LENGTH:
+        return jsonify({"error": f"Text exceeds {MAX_TEXT_LENGTH} chars"}), 400
+    return jsonify(predict([text])[0])
 
 
 @app.route("/batch_predict", methods=["POST"])
@@ -246,18 +239,17 @@ def predict_batch():
     data = request.get_json(force=True)
     if not data or "texts" not in data:
         return jsonify({"error": "Missing 'texts' field (list)"}), 400
-
     texts = data["texts"]
     if not isinstance(texts, list) or len(texts) == 0:
         return jsonify({"error": "'texts' must be a non-empty list"}), 400
     if len(texts) > 100:
         return jsonify({"error": "Maximum 100 texts per batch"}), 400
-
+    for i, t in enumerate(texts):
+        if len(str(t)) > MAX_TEXT_LENGTH:
+            return jsonify({"error": f"Text at index {i} exceeds {MAX_TEXT_LENGTH} chars"}), 400
     results = predict([str(t) for t in texts])
     return jsonify({"results": results, "count": len(results)})
 
-
-# ── Main ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     _init_model()
