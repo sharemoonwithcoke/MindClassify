@@ -33,6 +33,8 @@ from data_preprocessing import LABEL_NAMES, ID2LABEL
 
 PLOTS_DIR = "plots"
 os.makedirs(PLOTS_DIR, exist_ok=True)
+SUMMARY_CSV = os.path.join(PLOTS_DIR, "model_metrics_summary.csv")
+SUMMARY_JSON = os.path.join(PLOTS_DIR, "model_metrics_summary.json")
 
 SUICIDAL_IDX = LABEL_NAMES.index("Suicidal")
 
@@ -195,6 +197,25 @@ def print_comparison_table(results: dict) -> None:
         print(f"{name:<32} {m['f1_macro']:>10.4f} {m['accuracy']:>10.4f} {sr_str:>14}")
 
 
+def export_comparison_summary(results: dict, csv_path: str = SUMMARY_CSV,
+                              json_path: str = SUMMARY_JSON) -> pd.DataFrame:
+    rows = []
+    for name, metrics in sorted(results.items(), key=lambda x: -x[1].get("f1_macro", 0)):
+        rows.append({
+            "model": name,
+            "accuracy": metrics.get("accuracy"),
+            "f1_macro": metrics.get("f1_macro"),
+            "suicidal_recall": metrics.get("suicidal_recall"),
+        })
+
+    summary_df = pd.DataFrame(rows)
+    summary_df.to_csv(csv_path, index=False)
+    summary_df.to_json(json_path, orient="records", indent=2)
+    print(f"Saved summary CSV → {csv_path}")
+    print(f"Saved summary JSON → {json_path}")
+    return summary_df
+
+
 def plot_training_history(history_path: str) -> None:
     with open(history_path) as f:
         history = json.load(f)
@@ -324,6 +345,7 @@ def run_full_analysis(baseline_results: dict, transformer_results: dict) -> None
     plot_model_comparison(summary)
     plot_suicidal_recall_comparison(summary)
     print_comparison_table(summary)
+    export_comparison_summary(summary)
 
 
 if __name__ == "__main__":

@@ -30,6 +30,7 @@ Usage:
 import argparse
 import os
 import json
+import random
 import numpy as np
 import torch
 import torch.nn as nn
@@ -55,6 +56,37 @@ os.makedirs(SAVE_DIR, exist_ok=True)
 
 NUM_LABELS   = len(LABEL_NAMES)
 SUICIDAL_IDX = LABEL_NAMES.index("Suicidal")
+
+
+def _set_seed(seed: int) -> None:
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
+def _version_info() -> dict:
+    try:
+        import importlib.metadata as importlib_metadata
+        return {
+            "python": os.sys.version.split()[0],
+            "torch": torch.__version__,
+            "transformers": importlib_metadata.version("transformers"),
+            "scikit-learn": importlib_metadata.version("scikit-learn"),
+            "numpy": np.__version__,
+        }
+    except Exception:
+        return {
+            "python": os.sys.version.split()[0],
+            "torch": torch.__version__,
+            "transformers": "unknown",
+            "scikit-learn": "unknown",
+            "numpy": np.__version__,
+        }
 
 
 class MentalHealthDataset(torch.utils.data.Dataset):
@@ -121,8 +153,7 @@ def fine_tune(
     if max_length is None:
         max_length = MAX_LENGTH
 
-    torch.manual_seed(seed)
-    np.random.seed(seed)
+    _set_seed(seed)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device : {device}")
@@ -214,7 +245,20 @@ def fine_tune(
             patience_counter = 0
             model.save_pretrained(ckpt_path)
             tokenizer.save_pretrained(ckpt_path)
-            training_config = {"max_length": max_length, "model_name": model_name}
+            training_config = {
+                "max_length": max_length,
+                "model_name": model_name,
+                "seed": seed,
+                "epochs": epochs,
+                "batch_size": batch_size,
+                "lr": lr,
+                "warmup_ratio": warmup_ratio,
+                "patience": patience,
+                "use_weighted_loss": use_weighted_loss,
+                "max_train_samples": max_train_samples,
+                "max_val_samples": max_val_samples,
+                "versions": _version_info(),
+            }
             with open(os.path.join(ckpt_path, "training_config.json"), "w") as f:
                 json.dump(training_config, f, indent=2)
             print(f"  ** Saved best (val Macro F1={val_f1:.4f}) → {ckpt_path}")
@@ -250,6 +294,29 @@ def fine_tune(
         json.dump(history, f, indent=2)
     print(f"History saved → {hist_path}")
 
+    run_metadata = {
+        "model_name": model_name,
+        "seed": seed,
+        "epochs": epochs,
+        "batch_size": batch_size,
+        "lr": lr,
+        "max_length": max_length,
+        "patience": patience,
+        "use_weighted_loss": use_weighted_loss,
+        "max_train_samples": max_train_samples,
+        "max_val_samples": max_val_samples,
+        "test_metrics": {
+            "accuracy": test_acc,
+            "f1_macro": test_f1,
+            "suicidal_recall": suicidal_recall,
+        },
+        "versions": _version_info(),
+    }
+    meta_path = os.path.join(SAVE_DIR, f"{safe_name}_metadata.json")
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(run_metadata, f, indent=2)
+    print(f"Metadata saved → {meta_path}")
+
     test_results = {
         "test_df": test_df, "test_preds": test_preds, "test_labels": test_labels,
         "test_acc": test_acc, "test_f1": test_f1, "suicidal_recall": suicidal_recall,
@@ -269,6 +336,7 @@ if __name__ == "__main__":
     parser.add_argument("--no_weighted_loss", action="store_true")
     parser.add_argument("--max_train_samples", type=int, default=None)
     parser.add_argument("--max_val_samples", type=int, default=None)
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--fast", action="store_true",
                         help="Quick-test: 2 epochs, seq_len=64, batch=32, 2k train/500 val")
     args = parser.parse_args()
@@ -289,6 +357,7 @@ if __name__ == "__main__":
         model_name=args.model_name, data_path=args.data_path,
         epochs=args.epochs, batch_size=args.batch_size, lr=args.lr,
         max_length=args.max_length, patience=args.patience,
+        seed=args.seed,
         use_weighted_loss=not args.no_weighted_loss,
         max_train_samples=args.max_train_samples,
         max_val_samples=args.max_val_samples,
