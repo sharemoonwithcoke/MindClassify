@@ -66,7 +66,6 @@ def _load_model(model_type: str, model_path: str | None):
         tokenizer = AutoTokenizer.from_pretrained(model_path)
         model = AutoModelForSequenceClassification.from_pretrained(model_path)
         model.eval().to(device)
-        # ── 改动17: 从config读max_length ──────────────────────────────────
         cfg = _read_training_config(model_path)
         max_len = cfg.get("max_length", MAX_LENGTH)
         return ("transformer", model, tokenizer, device, max_len)
@@ -105,7 +104,6 @@ def run_prediction(text: str, state: tuple) -> tuple:
 
     if kind == "transformer":
         import torch
-        # ── 改动16: 用light clean ─────────────────────────────────────────
         cleaned = clean_text_transformer(text)
         enc = tokenizer(cleaned, truncation=True, padding=True,
                         max_length=max_len, return_tensors="pt")
@@ -147,7 +145,6 @@ def run_prediction(text: str, state: tuple) -> tuple:
                 matched = label
                 break
         pred_id = LABEL_NAMES.index(matched)
-        # ── 改动18: 用text hash做seed ─────────────────────────────────────
         rng = np.random.default_rng(abs(hash(text)) % (2**31))
         base = rng.dirichlet(np.ones(len(LABEL_NAMES)) * 0.5)
         base[pred_id] = max(base[pred_id], 0.55)
@@ -163,7 +160,6 @@ def build_interface(model_state: tuple):
     import gradio as gr
     import pandas as pd
 
-    # ── 改动15: 删掉重复的classify, on_submit直接调run_prediction ─────────
     def on_submit(text):
         if not text or not text.strip():
             return "Please enter some text.", gr.update(visible=False)

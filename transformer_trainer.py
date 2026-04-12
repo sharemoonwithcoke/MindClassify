@@ -214,7 +214,6 @@ def fine_tune(
             patience_counter = 0
             model.save_pretrained(ckpt_path)
             tokenizer.save_pretrained(ckpt_path)
-            # ── 改动9: 保存training config供推理时读取 ─────────────────────
             training_config = {"max_length": max_length, "model_name": model_name}
             with open(os.path.join(ckpt_path, "training_config.json"), "w") as f:
                 json.dump(training_config, f, indent=2)
