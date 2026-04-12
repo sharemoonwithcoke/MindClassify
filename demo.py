@@ -14,18 +14,12 @@ Run:
 
 import argparse
 import os
-import sys
-
+import json
 import numpy as np
 
-# ── Colour palette for classes ────────────────────────────────────────────────
 CLASS_COLORS = {
-    "Normal": "#4CAF50",
-    "Depression": "#2196F3",
-    "Suicidal": "#F44336",
-    "Anxiety": "#FF9800",
-    "Stress": "#9C27B0",
-    "Bipolar": "#00BCD4",
+    "Normal": "#4CAF50", "Depression": "#2196F3", "Suicidal": "#F44336",
+    "Anxiety": "#FF9800", "Stress": "#9C27B0", "Bipolar": "#00BCD4",
     "Personality Disorder": "#795548",
 }
 
@@ -54,9 +48,17 @@ EXAMPLES = [
 ]
 
 
-# ── Prediction helpers ────────────────────────────────────────────────────────
+def _read_training_config(path: str) -> dict:
+    cfg_path = os.path.join(path, "training_config.json")
+    if os.path.exists(cfg_path):
+        with open(cfg_path) as f:
+            return json.load(f)
+    return {}
+
 
 def _load_model(model_type: str, model_path: str | None):
+    from data_preprocessing import MAX_LENGTH
+
     if model_type == "transformer" and model_path:
         import torch
         from transformers import AutoTokenizer, AutoModelForSequenceClassification
@@ -64,11 +66,14 @@ def _load_model(model_type: str, model_path: str | None):
         tokenizer = AutoTokenizer.from_pretrained(model_path)
         model = AutoModelForSequenceClassification.from_pretrained(model_path)
         model.eval().to(device)
-        return ("transformer", model, tokenizer, device)
+        # ── 改动17: 从config读max_length ──────────────────────────────────
+        cfg = _read_training_config(model_path)
+        max_len = cfg.get("max_length", MAX_LENGTH)
+        return ("transformer", model, tokenizer, device, max_len)
 
     if model_type == "baseline" and model_path:
         import joblib
-        return ("baseline", joblib.load(model_path), None, None)
+        return ("baseline", joblib.load(model_path), None, None, None)
 
     # Auto-detect
     save_dir = "saved_models"
@@ -82,23 +87,28 @@ def _load_model(model_type: str, model_path: str | None):
             candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
             return _load_model("transformer", candidates[0])
 
-        pkl = os.path.join(save_dir, "baseline.pkl")
+        pkl = os.path.join(save_dir, "baseline_lr.pkl")
         if os.path.exists(pkl):
             return _load_model("baseline", pkl)
 
-    return ("demo", None, None, None)
+    return ("demo", None, None, None, None)
 
 
 def run_prediction(text: str, state: tuple) -> tuple:
-    from data_preprocessing import clean_text, ID2LABEL
+    from data_preprocessing import clean_text_baseline, clean_text_transformer, ID2LABEL
 
-    kind, model, tokenizer, device = state
+    kind = state[0]
+    model = state[1]
+    tokenizer = state[2]
+    device = state[3]
+    max_len = state[4]
 
     if kind == "transformer":
         import torch
-        cleaned = clean_text(text)
+        # ── 改动16: 用light clean ─────────────────────────────────────────
+        cleaned = clean_text_transformer(text)
         enc = tokenizer(cleaned, truncation=True, padding=True,
-                        max_length=128, return_tensors="pt")
+                        max_length=max_len, return_tensors="pt")
         enc = {k: v.to(device) for k, v in enc.items()}
         with torch.no_grad():
             probs = torch.softmax(model(**enc).logits, dim=-1).cpu().numpy()[0]
@@ -107,8 +117,7 @@ def run_prediction(text: str, state: tuple) -> tuple:
         prob_dict = {LABEL_NAMES[i]: float(probs[i]) for i in range(len(LABEL_NAMES))}
 
     elif kind == "baseline":
-        from data_preprocessing import clean_text
-        cleaned = clean_text(text)
+        cleaned = clean_text_baseline(text)
         pred_id = int(model.predict([cleaned])[0])
         try:
             probs = model.predict_proba([cleaned])[0]
@@ -138,6 +147,7 @@ def run_prediction(text: str, state: tuple) -> tuple:
                 matched = label
                 break
         pred_id = LABEL_NAMES.index(matched)
+        # ── 改动18: 用text hash做seed ─────────────────────────────────────
         rng = np.random.default_rng(abs(hash(text)) % (2**31))
         base = rng.dirichlet(np.ones(len(LABEL_NAMES)) * 0.5)
         base[pred_id] = max(base[pred_id], 0.55)
@@ -149,33 +159,26 @@ def run_prediction(text: str, state: tuple) -> tuple:
     return LABEL_NAMES[pred_id], confidence, prob_dict
 
 
-# ── Gradio UI ─────────────────────────────────────────────────────────────────
-
 def build_interface(model_state: tuple):
     import gradio as gr
+    import pandas as pd
 
-    def classify(text: str):
+    # ── 改动15: 删掉重复的classify, on_submit直接调run_prediction ─────────
+    def on_submit(text):
         if not text or not text.strip():
-            return "Please enter some text.", None, None
-
+            return "Please enter some text.", gr.update(visible=False)
         label, confidence, prob_dict = run_prediction(text, model_state)
-
-        # Result markdown
         color = CLASS_COLORS.get(label, "#607D8B")
         resource = SAFE_RESOURCES.get(label, "")
-        md = f"""
-### Prediction: <span style='color:{color}; font-weight:bold'>{label}</span>
+        md = f"""### Prediction: <span style='color:{color}; font-weight:bold'>{label}</span>
 **Confidence:** {confidence:.1%}
 
-{f'> {resource}' if resource else ''}
-{'> ⚠️ *This is a demo system — not a medical diagnosis tool.*' if model_state[0] == 'demo' else '> *Note: Not a substitute for professional mental health advice.*'}
-"""
-        # Bar chart data for Gradio
-        sorted_probs = sorted(prob_dict.items(), key=lambda x: -x[1])
-        bar_labels = [item[0] for item in sorted_probs]
-        bar_values = [item[1] for item in sorted_probs]
+{f"> {resource}" if resource else ""}
+> *Not a substitute for professional mental health advice.*"""
 
-        return md, (bar_labels, bar_values), prob_dict
+        sorted_probs = sorted(prob_dict.items(), key=lambda x: -x[1])
+        df = pd.DataFrame(sorted_probs, columns=["Category", "Probability"])
+        return md, df
 
     mode_tag = f"Mode: **{model_state[0].upper()}**"
 
@@ -186,7 +189,6 @@ def build_interface(model_state: tuple):
 {mode_tag} | 7 categories: Normal · Depression · Suicidal · Anxiety · Stress · Bipolar · Personality Disorder
 ---
 """)
-
         with gr.Row():
             with gr.Column(scale=2):
                 text_input = gr.Textbox(
@@ -195,22 +197,15 @@ def build_interface(model_state: tuple):
                     lines=5,
                 )
                 submit_btn = gr.Button("Classify", variant="primary")
-
             with gr.Column(scale=2):
                 result_md = gr.Markdown(label="Result")
                 prob_bar = gr.BarPlot(
-                    x="Category",
-                    y="Probability",
-                    title="Class Probabilities",
-                    height=280,
-                    visible=True,
+                    x="Category", y="Probability",
+                    title="Class Probabilities", height=280, visible=True,
                 )
 
         gr.Markdown("### Examples")
-        gr.Examples(
-            examples=EXAMPLES,
-            inputs=text_input,
-        )
+        gr.Examples(examples=EXAMPLES, inputs=text_input)
 
         gr.Markdown("""
 ---
@@ -218,24 +213,6 @@ def build_interface(model_state: tuple):
 It is **not** a clinical diagnostic tool. If you or someone you know needs help,
 please contact a qualified mental health professional.
 """)
-
-        def on_submit(text):
-            if not text or not text.strip():
-                return "Please enter some text.", gr.update(visible=False)
-            label, confidence, prob_dict = run_prediction(text, model_state)
-            color = CLASS_COLORS.get(label, "#607D8B")
-            resource = SAFE_RESOURCES.get(label, "")
-            md = f"""### Prediction: <span style='color:{color}; font-weight:bold'>{label}</span>
-**Confidence:** {confidence:.1%}
-
-{f"> {resource}" if resource else ""}
-> *Not a substitute for professional mental health advice.*"""
-
-            import pandas as pd
-            sorted_probs = sorted(prob_dict.items(), key=lambda x: -x[1])
-            df = pd.DataFrame(sorted_probs, columns=["Category", "Probability"])
-            return md, df
-
         submit_btn.click(fn=on_submit, inputs=text_input, outputs=[result_md, prob_bar])
         text_input.submit(fn=on_submit, inputs=text_input, outputs=[result_md, prob_bar])
 
@@ -244,12 +221,12 @@ please contact a qualified mental health professional.
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_type", default="auto", choices=["auto", "transformer", "baseline", "demo"])
+    parser.add_argument("--model_type", default="auto",
+                        choices=["auto", "transformer", "baseline", "demo"])
     parser.add_argument("--model_path", default=None)
     parser.add_argument("--port", type=int, default=7860)
-    parser.add_argument("--server-name", dest="server_name", default="127.0.0.1",
-                        help="Host to bind (use 0.0.0.0 inside Docker)")
-    parser.add_argument("--share", action="store_true", help="Generate public Gradio link")
+    parser.add_argument("--server-name", dest="server_name", default="127.0.0.1")
+    parser.add_argument("--share", action="store_true")
     args = parser.parse_args()
 
     print("Loading model...")

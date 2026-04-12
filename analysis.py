@@ -17,6 +17,7 @@ Generates:
 
 import os
 import json
+import glob
 import textwrap
 import numpy as np
 import pandas as pd
@@ -41,20 +42,11 @@ _CLASS_COLORS = [
 ]
 
 
-# ── 1. Metrics report (console) ───────────────────────────────────────────────
-
 def print_metrics_report(y_true, y_pred, model_name: str) -> dict:
-    """
-    Print a structured evaluation report with Macro F1 as the primary metric
-    and Suicidal Recall highlighted as the key safety metric.
-    """
     acc      = accuracy_score(y_true, y_pred)
     f1_macro = f1_score(y_true, y_pred, average="macro", zero_division=0)
     precision, recall, f1_per, support = precision_recall_fscore_support(
-        y_true, y_pred,
-        labels=list(range(len(LABEL_NAMES))),
-        zero_division=0,
-    )
+        y_true, y_pred, labels=list(range(len(LABEL_NAMES))), zero_division=0)
     suicidal_recall  = recall[SUICIDAL_IDX]
     suicidal_support = int(support[SUICIDAL_IDX])
     suicidal_fn      = suicidal_support - int(round(suicidal_recall * suicidal_support))
@@ -71,69 +63,38 @@ def print_metrics_report(y_true, y_pred, model_name: str) -> dict:
     print(f"  {'-'*67}")
     for i, name in enumerate(LABEL_NAMES):
         marker = "  ◄ safety" if i == SUICIDAL_IDX else ""
-        print(
-            f"  {name:<25}"
-            f" {precision[i]:>10.4f}"
-            f" {recall[i]:>10.4f}"
-            f" {f1_per[i]:>10.4f}"
-            f" {int(support[i]):>10}"
-            f"{marker}"
-        )
+        print(f"  {name:<25} {precision[i]:>10.4f} {recall[i]:>10.4f}"
+              f" {f1_per[i]:>10.4f} {int(support[i]):>10}{marker}")
     print()
-
     return {
-        "accuracy": acc,
-        "f1_macro": f1_macro,
-        "suicidal_recall": suicidal_recall,
-        "per_class_precision": precision,
-        "per_class_recall": recall,
-        "per_class_f1": f1_per,
-        "support": support,
+        "accuracy": acc, "f1_macro": f1_macro, "suicidal_recall": suicidal_recall,
+        "per_class_precision": precision, "per_class_recall": recall,
+        "per_class_f1": f1_per, "support": support,
     }
 
 
-# ── 2. Confusion matrix ───────────────────────────────────────────────────────
-
 def plot_confusion_matrix(y_true, y_pred, model_name: str, normalise: bool = True) -> None:
-    """
-    7×7 confusion matrix. Useful for identifying which class pairs are most
-    confused (e.g. Depression ↔ Suicidal, Stress ↔ Anxiety).
-    """
     cm = confusion_matrix(y_true, y_pred)
     if normalise:
         cm_plot = cm.astype(float) / cm.sum(axis=1, keepdims=True)
-        fmt     = ".2f"
-        title   = f"Confusion Matrix (row-normalised) — {model_name}"
+        fmt, title = ".2f", f"Confusion Matrix (row-normalised) — {model_name}"
     else:
-        cm_plot = cm
-        fmt     = "d"
-        title   = f"Confusion Matrix — {model_name}"
+        cm_plot, fmt, title = cm, "d", f"Confusion Matrix — {model_name}"
 
     fig, ax = plt.subplots(figsize=(11, 9))
-    sns.heatmap(
-        cm_plot,
-        annot=True,
-        fmt=fmt,
-        cmap="Blues",
-        xticklabels=LABEL_NAMES,
-        yticklabels=LABEL_NAMES,
-        linewidths=0.4,
-        ax=ax,
-    )
-
-    # Highlight Suicidal row / column border
+    sns.heatmap(cm_plot, annot=True, fmt=fmt, cmap="Blues",
+                xticklabels=LABEL_NAMES, yticklabels=LABEL_NAMES,
+                linewidths=0.4, ax=ax)
     for spine in ax.spines.values():
         spine.set_visible(True)
     ax.add_patch(plt.Rectangle(
         (0, SUICIDAL_IDX), len(LABEL_NAMES), 1,
-        fill=False, edgecolor="#F44336", lw=2.5, clip_on=False,
-    ))
-
+        fill=False, edgecolor="#F44336", lw=2.5, clip_on=False))
     ax.set_xlabel("Predicted label", fontsize=12)
-    ax.set_ylabel("True label",      fontsize=12)
+    ax.set_ylabel("True label", fontsize=12)
     ax.set_title(title, fontsize=13, pad=12)
     plt.xticks(rotation=35, ha="right", fontsize=9)
-    plt.yticks(rotation=0,  fontsize=9)
+    plt.yticks(rotation=0, fontsize=9)
     plt.tight_layout()
 
     safe = model_name.lower().replace(" ", "_").replace("/", "_")
@@ -144,18 +105,11 @@ def plot_confusion_matrix(y_true, y_pred, model_name: str, normalise: bool = Tru
     print(f"Saved: {path}")
 
 
-# ── 3. Per-class F1 + Recall bar charts ──────────────────────────────────────
-
 def plot_per_class_f1(y_true, y_pred, model_name: str) -> None:
-    """Horizontal bar chart of per-class F1; Suicidal bar is highlighted red."""
     _, _, f1_per, _ = precision_recall_fscore_support(
-        y_true, y_pred, labels=list(range(len(LABEL_NAMES))), zero_division=0
-    )
-
-    colors = [
-        "#F44336" if i == SUICIDAL_IDX else _CLASS_COLORS[i]
-        for i in range(len(LABEL_NAMES))
-    ]
+        y_true, y_pred, labels=list(range(len(LABEL_NAMES))), zero_division=0)
+    colors = ["#F44336" if i == SUICIDAL_IDX else _CLASS_COLORS[i]
+              for i in range(len(LABEL_NAMES))]
 
     fig, ax = plt.subplots(figsize=(10, 5))
     bars = ax.barh(LABEL_NAMES, f1_per, color=colors)
@@ -178,10 +132,6 @@ def plot_per_class_f1(y_true, y_pred, model_name: str) -> None:
 
 
 def plot_suicidal_recall_comparison(results: dict) -> None:
-    """
-    Bar chart comparing Suicidal Recall across all models.
-    results: {model_name: {"suicidal_recall": float}}
-    """
     names   = list(results.keys())
     recalls = [results[n].get("suicidal_recall", 0.0) for n in names]
 
@@ -199,45 +149,33 @@ def plot_suicidal_recall_comparison(results: dict) -> None:
         ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.01,
                 f"{val:.3f}", ha="center", va="bottom", fontsize=9)
     plt.tight_layout()
-
     path = os.path.join(PLOTS_DIR, "suicidal_recall_comparison.png")
     fig.savefig(path, dpi=150)
     plt.close(fig)
     print(f"Saved: {path}")
 
 
-# ── 4. Model comparison (Macro F1 primary) ────────────────────────────────────
-
 def plot_model_comparison(results: dict) -> None:
-    """
-    Grouped bar chart: Macro F1 (primary) and Accuracy (secondary).
-    results: {model_name: {"accuracy": float, "f1_macro": float}}
-    """
     names = list(results.keys())
     accs  = [results[n]["accuracy"] for n in names]
     f1s   = [results[n]["f1_macro"] for n in names]
-
     x     = np.arange(len(names))
     width = 0.35
 
     fig, ax = plt.subplots(figsize=(12, 6))
     bars_f1  = ax.bar(x - width/2, f1s,  width, label="Macro F1 (primary)", color="#DD8452")
     bars_acc = ax.bar(x + width/2, accs, width, label="Accuracy",            color="#4C72B0")
-
     ax.set_ylabel("Score")
-    ax.set_title("Model Comparison — MindClassify\n"
-                 "(Baseline → BERT → MentalBERT)")
+    ax.set_title("Model Comparison — MindClassify\n(Baseline → BERT → MentalBERT)")
     ax.set_xticks(x)
     ax.set_xticklabels(names, rotation=15, ha="right")
     ax.set_ylim(0, 1.08)
     ax.legend()
     ax.grid(axis="y", alpha=0.3)
-
     for bar in list(bars_f1) + list(bars_acc):
         h = bar.get_height()
         ax.text(bar.get_x() + bar.get_width() / 2, h + 0.005,
                 f"{h:.3f}", ha="center", va="bottom", fontsize=8)
-
     plt.tight_layout()
     path = os.path.join(PLOTS_DIR, "model_comparison.png")
     fig.savefig(path, dpi=150)
@@ -246,7 +184,6 @@ def plot_model_comparison(results: dict) -> None:
 
 
 def print_comparison_table(results: dict) -> None:
-    """Print final comparison sorted by Macro F1 descending."""
     print("\n" + "=" * 72)
     print("FINAL MODEL COMPARISON  (sorted by Macro F1)")
     print("=" * 72)
@@ -255,46 +192,29 @@ def print_comparison_table(results: dict) -> None:
     for name, m in sorted(results.items(), key=lambda x: -x[1].get("f1_macro", 0)):
         sr = m.get("suicidal_recall", float("nan"))
         sr_str = f"{sr:.4f}" if not np.isnan(sr) else "  N/A"
-        print(
-            f"{name:<32}"
-            f" {m['f1_macro']:>10.4f}"
-            f" {m['accuracy']:>10.4f}"
-            f" {sr_str:>14}"
-        )
+        print(f"{name:<32} {m['f1_macro']:>10.4f} {m['accuracy']:>10.4f} {sr_str:>14}")
 
-
-# ── 5. Training history ───────────────────────────────────────────────────────
 
 def plot_training_history(history_path: str) -> None:
-    """Loss and Macro F1 curves from a saved JSON history file."""
     with open(history_path) as f:
         history = json.load(f)
-
     epochs     = [h["epoch"]      for h in history]
     train_loss = [h["train_loss"] for h in history]
     val_loss   = [h["val_loss"]   for h in history]
     train_f1   = [h.get("train_f1", h.get("train_acc", 0)) for h in history]
     val_f1     = [h["val_f1"]     for h in history]
-
     model_name = os.path.basename(history_path).replace("_history.json", "")
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-
     axes[0].plot(epochs, train_loss, "o-",  label="Train Loss", color="#4C72B0")
     axes[0].plot(epochs, val_loss,   "s--", label="Val Loss",   color="#DD8452")
-    axes[0].set_xlabel("Epoch")
-    axes[0].set_ylabel("Loss (weighted CE)")
-    axes[0].set_title(f"Training Loss — {model_name}")
-    axes[0].legend()
-    axes[0].grid(alpha=0.3)
+    axes[0].set_xlabel("Epoch"); axes[0].set_ylabel("Loss")
+    axes[0].set_title(f"Training Loss — {model_name}"); axes[0].legend(); axes[0].grid(alpha=0.3)
 
     axes[1].plot(epochs, train_f1, "o-",  label="Train Macro F1", color="#4C72B0")
     axes[1].plot(epochs, val_f1,   "s--", label="Val Macro F1",   color="#DD8452")
-    axes[1].set_xlabel("Epoch")
-    axes[1].set_ylabel("Macro F1  (primary metric)")
-    axes[1].set_title(f"Macro F1 — {model_name}")
-    axes[1].legend()
-    axes[1].grid(alpha=0.3)
+    axes[1].set_xlabel("Epoch"); axes[1].set_ylabel("Macro F1")
+    axes[1].set_title(f"Macro F1 — {model_name}"); axes[1].legend(); axes[1].grid(alpha=0.3)
 
     plt.tight_layout()
     path = os.path.join(PLOTS_DIR, f"history_{model_name}.png")
@@ -303,48 +223,25 @@ def plot_training_history(history_path: str) -> None:
     print(f"Saved: {path}")
 
 
-# ── 6. Qualitative analysis — misclassified suicidal posts ────────────────────
-
-def qualitative_suicidal_analysis(
-    test_df: pd.DataFrame,
-    y_true,
-    y_pred,
-    n_samples: int = 20,
-    save_path: str = None,
-) -> tuple:
-    """
-    Collect and display misclassified suicidal posts for manual linguistic review.
-
-    False Negatives (missed suicidal posts):
-        True = Suicidal, Predicted = something else
-        These are the highest-risk failures.
-
-    False Positives (incorrectly flagged as suicidal):
-        True = something else, Predicted = Suicidal
-
-    Saves a plain-text report to plots/suicidal_misclassifications.txt.
-    Returns: (false_negatives_df, false_positives_df)
-    """
+def qualitative_suicidal_analysis(test_df, y_true, y_pred,
+                                   n_samples: int = 20, save_path: str = None):
     y_true = list(y_true)
     y_pred = list(y_pred)
-
     df = test_df.copy().reset_index(drop=True)
     df["y_true"] = y_true
     df["y_pred"] = y_pred
 
-    # False Negatives: missed suicidal posts
-    fn_mask        = (df["y_true"] == SUICIDAL_IDX) & (df["y_pred"] != SUICIDAL_IDX)
+    fn_mask = (df["y_true"] == SUICIDAL_IDX) & (df["y_pred"] != SUICIDAL_IDX)
     false_negatives = df[fn_mask].copy()
     false_negatives["pred_label"] = [ID2LABEL[p] for p in false_negatives["y_pred"]]
 
-    # False Positives: incorrectly labelled as suicidal
-    fp_mask        = (df["y_pred"] == SUICIDAL_IDX) & (df["y_true"] != SUICIDAL_IDX)
+    fp_mask = (df["y_pred"] == SUICIDAL_IDX) & (df["y_true"] != SUICIDAL_IDX)
     false_positives = df[fp_mask].copy()
     false_positives["true_label"] = [ID2LABEL[t] for t in false_positives["y_true"]]
 
     total_suicidal  = int((df["y_true"] == SUICIDAL_IDX).sum())
-    fn_count        = len(false_negatives)
-    fp_count        = len(false_positives)
+    fn_count = len(false_negatives)
+    fp_count = len(false_positives)
     suicidal_recall = (total_suicidal - fn_count) / max(1, total_suicidal)
 
     sample_fn = false_negatives.head(n_samples)
@@ -363,7 +260,6 @@ def qualitative_suicidal_analysis(
     lines.append("Focus: linguistic patterns the model misses —")
     lines.append("  indirect expressions, understatement, metaphor, coded language.")
 
-    # ── False Negatives ───────────────────────────────────────────────────────
     lines.append(f"\n{'─'*70}")
     lines.append(f"FALSE NEGATIVES — missed suicidal intent ({len(sample_fn)} samples)")
     lines.append(f"{'─'*70}")
@@ -374,13 +270,12 @@ def qualitative_suicidal_analysis(
         for chunk in textwrap.wrap(raw_text, width=70):
             lines.append(f"       {chunk}")
 
-    # ── False Positives ───────────────────────────────────────────────────────
     if len(sample_fp) > 0:
         lines.append(f"\n{'─'*70}")
         lines.append(f"FALSE POSITIVES — incorrectly flagged as suicidal ({len(sample_fp)} samples)")
         lines.append(f"{'─'*70}")
         for i, row in enumerate(sample_fp.itertuples(), 1):
-            raw_text  = str(getattr(row, "raw_text_original", getattr(row, "text", "")))
+            raw_text = str(getattr(row, "raw_text_original", getattr(row, "text", "")))
             lines.append(f"\n[{i:02d}] True label: {row.true_label}")
             lines.append("     Text:")
             for chunk in textwrap.wrap(raw_text, width=70):
@@ -398,35 +293,12 @@ def qualitative_suicidal_analysis(
     with open(save_path, "w", encoding="utf-8") as f:
         f.write(output)
     print(f"\nSaved qualitative analysis → {save_path}")
-
     return false_negatives, false_positives
 
 
-# ── 7. Full analysis pipeline ─────────────────────────────────────────────────
-
-def run_full_analysis(
-    baseline_results: dict,
-    transformer_results: dict,
-) -> None:
-    """
-    Runs the complete evaluation plan:
-      Step 1 — baseline plots + report
-      Step 2/3 — transformer plots + training history + qualitative analysis
-      Final — comparison table + comparison chart
-
-    Each dict value shape:
-      {
-        "accuracy": float,
-        "f1_macro": float,
-        "suicidal_recall": float,
-        "preds": list[int],
-        "true": list[int],
-        "test_df": pd.DataFrame,   # optional — needed for qualitative analysis
-      }
-    """
+def run_full_analysis(baseline_results: dict, transformer_results: dict) -> None:
     all_results = {**baseline_results, **transformer_results}
 
-    # Per-model plots
     for name, res in all_results.items():
         if "preds" not in res or "true" not in res:
             continue
@@ -439,22 +311,14 @@ def run_full_analysis(
                 res["test_df"], res["true"], res["preds"],
                 save_path=os.path.join(
                     PLOTS_DIR,
-                    f"suicidal_misclassifications_{name.lower().replace(' ', '_')}.txt",
-                ),
-            )
+                    f"suicidal_misclassifications_{name.lower().replace(' ', '_')}.txt"))
 
-    # Training history for transformer runs
-    import glob
     for hist_file in glob.glob("saved_models/*_history.json"):
         plot_training_history(hist_file)
 
-    # Cross-model comparison (Macro F1 primary, Suicidal Recall safety)
     summary = {
-        n: {
-            "accuracy": r["accuracy"],
-            "f1_macro": r["f1_macro"],
-            "suicidal_recall": r.get("suicidal_recall", float("nan")),
-        }
+        n: {"accuracy": r["accuracy"], "f1_macro": r["f1_macro"],
+            "suicidal_recall": r.get("suicidal_recall", float("nan"))}
         for n, r in all_results.items()
     }
     plot_model_comparison(summary)
@@ -463,7 +327,6 @@ def run_full_analysis(
 
 
 if __name__ == "__main__":
-    import glob
     for hist_file in glob.glob("saved_models/*_history.json"):
         plot_training_history(hist_file)
-    print("\nAnalysis complete. Check the 'plots/' directory.")
+    print("Analysis complete. Check the 'plots/' directory.")
